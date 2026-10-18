@@ -38,12 +38,24 @@ data class KanimeEpisodeItem(
     val thumbnailUrl: String? = null
 )
 
+data class KanimeEpisodeDetails(
+    val episodeNumber: Int,
+    val title: String,
+    val episodeUrl: String,
+    val posterUrl: String,
+    val date: String = "",
+    val isUncensored: Boolean = false,
+    val description: String = "",
+    val gallery: List<String> = emptyList()
+)
+
 data class KanimeAnimeDetails(
     val seriesId: String,
     val title: String,
     val posterUrl: String,
     val description: String,
-    val episodes: List<KanimeEpisodeItem>
+    val episodes: List<KanimeEpisodeItem>,
+    val defaultEpisodeDetails: KanimeEpisodeDetails? = null
 )
 
 fun cleanHanimeTitle(rawTitle: String): String {
@@ -397,12 +409,157 @@ object kstreamScraper {
 
         episodes.sortBy { it.episodeNumber }
 
+        val initialEpDetails = try {
+            getEpisodeDetails(item.episodeUrl, fallbackTitle = item.title, fallbackPoster = posterUrl)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error fetching initial episode details: ${e.message}")
+            null
+        }
+
         KanimeAnimeDetails(
             seriesId = seriesSlug,
             title = animeTitle,
-            posterUrl = posterUrl,
-            description = description.ifEmpty { "No description available." },
-            episodes = episodes
+            posterUrl = initialEpDetails?.posterUrl ?: posterUrl,
+            description = initialEpDetails?.description?.takeIf { it.isNotBlank() } ?: description.ifEmpty { "No description available." },
+            episodes = episodes,
+            defaultEpisodeDetails = initialEpDetails
         )
+    }
+
+    fun extractEpNumber(url: String): Int {
+        val clean = url.substringBefore("?").trimEnd('/')
+        val match = Regex("""-(\d+)$""").find(clean)
+        return match?.groupValues?.get(1)?.toIntOrNull() ?: 1
+    }
+
+    suspend fun getEpisodeDetails(
+        episodeUrl: String,
+        fallbackTitle: String = "",
+        fallbackPoster: String = ""
+    ): KanimeEpisodeDetails = withContext(Dispatchers.IO) {
+        val epNum = extractEpNumber(episodeUrl)
+        try {
+            val html = NetworkClient.getHtml(episodeUrl, mapOf("Referer" to "$BASE_URL/"))
+            if (html.isBlank()) {
+                return@withContext KanimeEpisodeDetails(
+                    episodeNumber = epNum,
+                    title = fallbackTitle.ifEmpty { "Episode $epNum" },
+                    episodeUrl = episodeUrl,
+                    posterUrl = fallbackPoster,
+                    date = "",
+                    isUncensored = fallbackTitle.contains("uncensored", ignoreCase = true),
+                    description = "No description available.",
+                    gallery = emptyList()
+                )
+            }
+
+            val doc = Jsoup.parse(html, episodeUrl)
+
+            // 1. Title with episode numbering as on site (e.g. from H1 or og:title)
+            val h1 = doc.selectFirst("h1")?.text()?.replace(Regex("""\s+"""), " ")?.trim().orEmpty()
+            val cleanTitle = if (h1.isNotEmpty()) {
+                h1
+            } else {
+                val ogTitle = doc.selectFirst("meta[property='og:title']")?.attr("content")?.trim().orEmpty()
+                if (ogTitle.isNotEmpty()) {
+                    ogTitle.substringBefore(" - English").substringBefore(" | ").trim()
+                } else {
+                    fallbackTitle.ifEmpty { "Episode $epNum" }
+                }
+            }
+
+            // 2. Poster for this episode
+            var poster = doc.selectFirst("img[src*='cover-ep-']")?.attr("src")?.trim().orEmpty()
+            if (poster.isEmpty()) {
+                poster = doc.selectFirst("meta[property='og:image']")?.attr("content")?.trim().orEmpty()
+            }
+            if (poster.isEmpty()) {
+                poster = fallbackPoster
+            }
+            if (poster.isNotEmpty() && !poster.startsWith("http")) {
+                poster = "$BASE_URL${if (poster.startsWith("/")) "" else "/"}$poster"
+            }
+
+            // 3. Date
+            var date = ""
+            val calMatch = Regex("""fa-(?:calendar|upload)[^>]*></i>\s*([0-9]{4}-[0-9]{2}-[0-9]{2})""").find(html)
+            if (calMatch != null) {
+                date = calMatch.groupValues[1]
+            } else {
+                val jsonDate = Regex(""""uploadDate":"([0-9]{4}-[0-9]{2}-[0-9]{2})""").find(html)
+                if (jsonDate != null) {
+                    date = jsonDate.groupValues[1]
+                } else {
+                    val genericDate = Regex("""\b(20[12][0-9]-[01][0-9]-[0-3][0-9])\b""").find(html)
+                    if (genericDate != null) date = genericDate.groupValues[1]
+                }
+            }
+
+            // 4. Censored / Uncensored
+            val isUncensored = html.contains("tags%5B0%5D=uncensored", ignoreCase = true) ||
+                html.contains("tags[0]=uncensored", ignoreCase = true) ||
+                cleanTitle.contains("uncensored", ignoreCase = true) ||
+                doc.select("a[href*='uncensored']").isNotEmpty() ||
+                doc.select("meta[name='description']").attr("content").contains("uncensored", ignoreCase = true)
+
+            // 5. Description
+            var description = doc.select("h2:contains(Description) ~ p").firstOrNull()?.text()?.trim().orEmpty()
+            if (description.isEmpty()) {
+                description = doc.select("div:has(h2:contains(Description)) p").firstOrNull()?.text()?.trim().orEmpty()
+            }
+            if (description.isEmpty()) {
+                description = doc.select("meta[name='description']").attr("content").trim()
+            }
+            if (description.isEmpty()) {
+                description = "No description available."
+            }
+
+            // 6. Gallery
+            val gallery = mutableListOf<String>()
+            val galleryImgs = doc.select("a[data-gallery='episode-gallery'] img, img[src*='gallery-ep-']")
+            for (img in galleryImgs) {
+                var src = img.attr("src").trim()
+                if (src.isEmpty()) continue
+                if (!src.startsWith("http")) {
+                    src = "$BASE_URL${if (src.startsWith("/")) "" else "/"}$src"
+                }
+                if (src !in gallery) {
+                    gallery.add(src)
+                }
+            }
+            if (gallery.isEmpty()) {
+                val regexMatches = Regex("""(?:href|src)=["']([^"']*(?:gallery-ep-[0-9]+-[0-9]+)[^"']*)["']""").findAll(html)
+                for (m in regexMatches) {
+                    var src = m.groupValues[1]
+                    if (src.contains("thumbnail") || src.endsWith(".webp") || src.endsWith(".jpg") || src.endsWith(".png")) {
+                        if (!src.startsWith("http")) src = "$BASE_URL${if (src.startsWith("/")) "" else "/"}$src"
+                        if (src !in gallery) gallery.add(src)
+                    }
+                }
+            }
+
+            KanimeEpisodeDetails(
+                episodeNumber = epNum,
+                title = cleanTitle,
+                episodeUrl = episodeUrl,
+                posterUrl = poster,
+                date = date,
+                isUncensored = isUncensored,
+                description = description,
+                gallery = gallery
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching episode details for $episodeUrl: ${e.message}", e)
+            KanimeEpisodeDetails(
+                episodeNumber = epNum,
+                title = fallbackTitle.ifEmpty { "Episode $epNum" },
+                episodeUrl = episodeUrl,
+                posterUrl = fallbackPoster,
+                date = "",
+                isUncensored = false,
+                description = "No description available.",
+                gallery = emptyList()
+            )
+        }
     }
 }

@@ -2379,6 +2379,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun playKanimeEpisodeDetails(details: com.example.network.KanimeEpisodeDetails) {
+        playKanimeEpisode(
+            com.example.network.KanimeEpisodeItem(
+                episodeNumber = details.episodeNumber,
+                title = details.title,
+                episodeUrl = details.episodeUrl,
+                thumbnailUrl = details.posterUrl
+            )
+        )
+    }
+
     fun playKanimeItem(item: com.example.network.KstreamMediaItem) {
         _resolvingVideoStatus.value = "Resolving stream from Kstream..."
         viewModelScope.launch(Dispatchers.IO) {
