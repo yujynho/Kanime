@@ -31,6 +31,30 @@ data class KstreamMediaItem(
     val likes: String? = null
 )
 
+data class KanimeEpisodeItem(
+    val episodeNumber: Int,
+    val title: String,
+    val episodeUrl: String,
+    val thumbnailUrl: String? = null
+)
+
+data class KanimeAnimeDetails(
+    val seriesId: String,
+    val title: String,
+    val posterUrl: String,
+    val description: String,
+    val episodes: List<KanimeEpisodeItem>
+)
+
+fun cleanHanimeTitle(rawTitle: String): String {
+    return rawTitle
+        .replace(Regex("""\s*-\s*\d+$"""), "")
+        .replace(Regex("""\s+Episode\s+\d+.*$""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""\s+Ep\.?\s*\d+.*$""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""\s+\d+$"""), "")
+        .trim()
+}
+
 data class KstreamResolvedStream(
     val title: String,
     val posterUrl: String,
@@ -247,5 +271,138 @@ object kstreamScraper {
             Log.e(TAG, "Error resolving stream for $episodeUrl: ${e.message}", e)
             null
         }
+    }
+
+    suspend fun getAnimeDetails(item: KstreamMediaItem): KanimeAnimeDetails = withContext(Dispatchers.IO) {
+        val cleanInitialTitle = cleanHanimeTitle(item.title)
+        val slug = item.episodeUrl.substringAfterLast("/hentai/").substringBefore("?").trim()
+        val seriesSlug = slug.replace(Regex("""-\d+$"""), "")
+        val seriesUrl = "$BASE_URL/hentai/$seriesSlug"
+
+        var animeTitle = cleanInitialTitle
+        var posterUrl = item.posterUrl
+        var description = ""
+        val episodes = mutableListOf<KanimeEpisodeItem>()
+        val seenUrls = mutableSetOf<String>()
+
+        try {
+            // 1. Try loading series page
+            val html = NetworkClient.getHtml(seriesUrl, mapOf("Referer" to "$BASE_URL/"))
+            if (html.isNotBlank()) {
+                val doc = Jsoup.parse(html, seriesUrl)
+
+                val h1 = doc.selectFirst("h1")?.text()?.trim().orEmpty()
+                if (h1.isNotEmpty()) {
+                    animeTitle = cleanHanimeTitle(h1)
+                }
+
+                val coverImg = doc.selectFirst("img[src*='cover-ep-']")?.attr("src")?.trim()
+                    ?: doc.selectFirst("img[src*='/images/hentai/']")?.attr("src")?.trim()
+                if (!coverImg.isNullOrEmpty()) {
+                    posterUrl = if (coverImg.startsWith("http")) coverImg else "$BASE_URL${if (coverImg.startsWith("/")) "" else "/"}$coverImg"
+                    if (posterUrl.contains("gallery-ep-") && posterUrl.contains("-thumbnail.webp")) {
+                        posterUrl = posterUrl.replace(Regex("""gallery-ep-(\d+)-\d+-thumbnail\.webp"""), "cover-ep-$1.webp")
+                    }
+                }
+
+                description = doc.select("h2:contains(Description) ~ p").firstOrNull()?.text()?.trim().orEmpty()
+                if (description.isEmpty()) {
+                    description = doc.select("div:has(h2:contains(Description)) p").firstOrNull()?.text()?.trim().orEmpty()
+                }
+                if (description.isEmpty()) {
+                    description = doc.select("meta[name='description']").attr("content").trim()
+                }
+
+                val links = doc.select("a[href*='/hentai/']")
+                for (a in links) {
+                    val href = a.attr("href").trim()
+                    val fullUrl = if (href.startsWith("http")) href else "$BASE_URL${if (href.startsWith("/")) "" else "/"}$href"
+                    val epSlug = fullUrl.substringAfterLast("/hentai/").substringBefore("?")
+                    val match = Regex("""^${Regex.escape(seriesSlug)}-(\d+)$""").find(epSlug)
+                    if (match != null) {
+                        if (!seenUrls.add(fullUrl)) continue
+                        val epNum = match.groupValues[1].toIntOrNull() ?: 1
+                        var thumb = a.selectFirst("img")?.attr("src")?.trim().orEmpty()
+                        if (thumb.isNotEmpty() && !thumb.startsWith("http")) thumb = "$BASE_URL${if (thumb.startsWith("/")) "" else "/"}$thumb"
+                        episodes.add(
+                            KanimeEpisodeItem(
+                                episodeNumber = epNum,
+                                title = "Episode $epNum",
+                                episodeUrl = fullUrl,
+                                thumbnailUrl = thumb.takeIf { it.isNotEmpty() }
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error fetching series page for $seriesUrl: ${e.message}")
+        }
+
+        // 2. If episodes list or description is missing, fallback to parsing episodeUrl page
+        if (episodes.isEmpty() || description.isEmpty()) {
+            try {
+                val epHtml = NetworkClient.getHtml(item.episodeUrl, mapOf("Referer" to "$BASE_URL/"))
+                if (epHtml.isNotBlank()) {
+                    val epDoc = Jsoup.parse(epHtml, item.episodeUrl)
+                    if (description.isEmpty()) {
+                        description = epDoc.select("h2:contains(Description) ~ p").firstOrNull()?.text()?.trim().orEmpty()
+                        if (description.isEmpty()) {
+                            description = epDoc.select("div:has(h2:contains(Description)) p").firstOrNull()?.text()?.trim().orEmpty()
+                        }
+                        if (description.isEmpty()) {
+                            description = epDoc.select("meta[name='description']").attr("content").trim()
+                        }
+                    }
+
+                    val links = epDoc.select("a[href*='/hentai/']")
+                    for (a in links) {
+                        val href = a.attr("href").trim()
+                        val fullUrl = if (href.startsWith("http")) href else "$BASE_URL${if (href.startsWith("/")) "" else "/"}$href"
+                        val epSlug = fullUrl.substringAfterLast("/hentai/").substringBefore("?")
+                        val match = Regex("""^${Regex.escape(seriesSlug)}-(\d+)$""").find(epSlug)
+                        if (match != null) {
+                            if (!seenUrls.add(fullUrl)) continue
+                            val epNum = match.groupValues[1].toIntOrNull() ?: 1
+                            var thumb = a.selectFirst("img")?.attr("src")?.trim().orEmpty()
+                            if (thumb.isNotEmpty() && !thumb.startsWith("http")) thumb = "$BASE_URL${if (thumb.startsWith("/")) "" else "/"}$thumb"
+                            episodes.add(
+                                KanimeEpisodeItem(
+                                    episodeNumber = epNum,
+                                    title = "Episode $epNum",
+                                    episodeUrl = fullUrl,
+                                    thumbnailUrl = thumb.takeIf { it.isNotEmpty() }
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error fetching episode page fallback for ${item.episodeUrl}: ${e.message}")
+            }
+        }
+
+        // 3. If still empty, ensure at least this episode is listed
+        if (episodes.isEmpty()) {
+            val epNum = Regex("""-(\d+)$""").find(item.episodeUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            episodes.add(
+                KanimeEpisodeItem(
+                    episodeNumber = epNum,
+                    title = "Episode $epNum",
+                    episodeUrl = item.episodeUrl,
+                    thumbnailUrl = item.posterUrl
+                )
+            )
+        }
+
+        episodes.sortBy { it.episodeNumber }
+
+        KanimeAnimeDetails(
+            seriesId = seriesSlug,
+            title = animeTitle,
+            posterUrl = posterUrl,
+            description = description.ifEmpty { "No description available." },
+            episodes = episodes
+        )
     }
 }

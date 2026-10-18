@@ -58,7 +58,7 @@ private fun getTabOrder(screen: ScreenState): Int? {
         is ScreenState.Actors, is ScreenState.ActorScenes -> 2
         is ScreenState.Studios, is ScreenState.StudioScenes -> 3
         is ScreenState.StashDb -> 4
-        is ScreenState.Kanime -> 5
+        is ScreenState.Kanime, is ScreenState.KanimeEpisodes -> 5
         is ScreenState.Settings -> 6
         else -> null
     }
@@ -518,6 +518,10 @@ fun MainAppShell(viewModel: MainViewModel) {
                                     viewModel = viewModel
                                 )
                                  is ScreenState.Kanime -> KanimeScreen(viewModel = viewModel)
+                                 is ScreenState.KanimeEpisodes -> KanimeEpisodesScreen(
+                                     viewModel = viewModel,
+                                     item = screen.item
+                                 )
                                  is ScreenState.Settings -> SettingsScreen(viewModel)
                             }
                         }
@@ -539,7 +543,8 @@ fun MainAppShell(viewModel: MainViewModel) {
                             currentScreen !is ScreenState.AddEditStudio &&
                             currentScreen !is ScreenState.OnlyhavenCreatorDetails &&
                             currentScreen !is ScreenState.OnlyhavenSavedCreators &&
-                            currentScreen !is ScreenState.Kanime
+                            currentScreen !is ScreenState.Kanime &&
+                            currentScreen !is ScreenState.KanimeEpisodes
 
                         AnimatedVisibility(
                             visible = shouldShowBottomBar,

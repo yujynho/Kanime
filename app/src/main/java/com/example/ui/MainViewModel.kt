@@ -66,6 +66,7 @@ sealed class ScreenState {
     object OnlyhavenSavedCreators : ScreenState()
     object Settings : ScreenState()
     object Kanime : ScreenState()
+    data class KanimeEpisodes(val item: com.example.network.KstreamMediaItem) : ScreenState()
 }
 
 data class ActiveVideoPlayback(
@@ -2347,6 +2348,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 android.util.Log.e("MainViewModel", "Failed to load more Kanime: ${e.message}", e)
             } finally {
                 _isKanimeLoadingMore.value = false
+            }
+        }
+    }
+
+    fun openKanimeItem(item: com.example.network.KstreamMediaItem) {
+        navigateTo(ScreenState.KanimeEpisodes(item))
+    }
+
+    fun playKanimeEpisode(episode: com.example.network.KanimeEpisodeItem) {
+        _resolvingVideoStatus.value = "Resolving stream for ${episode.title}..."
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val resolved = com.example.network.kstreamScraper.resolveStream(episode.episodeUrl)
+                if (resolved != null && resolved.qualities.isNotEmpty()) {
+                    val primary = resolved.qualities.firstOrNull { it.isDefault } ?: resolved.qualities.first()
+                    playVideo(
+                        rawUrl = primary.url,
+                        title = if (resolved.title.isNotBlank()) resolved.title else episode.title
+                    )
+                } else {
+                    _videoResolutionError.value = "Failed to extract video stream from episode."
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                _videoResolutionError.value = e.message ?: "Failed to extract video stream."
+            } finally {
+                _resolvingVideoStatus.value = null
             }
         }
     }

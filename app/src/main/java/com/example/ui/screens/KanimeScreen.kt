@@ -1,6 +1,9 @@
 package com.example.ui.screens
 
-import androidx.compose.animation.*
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -16,8 +19,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,11 +27,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -44,8 +46,13 @@ import com.example.R
 import com.example.network.KanimeSortOrder
 import com.example.network.KstreamMediaItem
 import com.example.ui.MainViewModel
+import com.example.ui.components.AppLottieLoadingAnimation
+import com.example.ui.components.ShimmerBrush
+import com.example.ui.components.vaultTopGlow
 import com.example.ui.theme.LocalAccentColor
+import com.example.ui.theme.LocalBetaTestPrivacy
 import com.example.ui.theme.LocalVaultPalette
+import com.example.ui.theme.privacyImageBlur
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,6 +63,7 @@ fun KanimeScreen(
     val palette = LocalVaultPalette.current
     val accent = LocalAccentColor.current
     val focusManager = LocalFocusManager.current
+    val focusRequester = remember { FocusRequester() }
 
     val feed by viewModel.kanimeFeed.collectAsStateWithLifecycle()
     val isLoading by viewModel.isKanimeLoading.collectAsStateWithLifecycle()
@@ -63,23 +71,34 @@ fun KanimeScreen(
     val error by viewModel.kanimeError.collectAsStateWithLifecycle()
     val canLoadMore by viewModel.kanimeCanLoadMore.collectAsStateWithLifecycle()
     val currentSort by viewModel.kanimeSortOrder.collectAsStateWithLifecycle()
-    val currentSearch by viewModel.kanimeSearchQuery.collectAsStateWithLifecycle()
+    val currentSearchQuery by viewModel.kanimeSearchQuery.collectAsStateWithLifecycle()
 
     val gridState = rememberLazyGridState()
 
-    var isSearchActive by remember { mutableStateOf(false) }
-    var searchInputText by remember { mutableStateOf(currentSearch) }
-    var isSortMenuExpanded by remember { mutableStateOf(false) }
-    val searchFocusRequester = remember { FocusRequester() }
+    var isSearchExpanded by remember { mutableStateOf(false) }
+    var searchInput by remember { mutableStateOf(currentSearchQuery) }
+    var showSortMenu by remember { mutableStateOf(false) }
 
-    // Initial load
+    // Sync input when query changes
+    LaunchedEffect(currentSearchQuery) {
+        searchInput = currentSearchQuery
+    }
+
+    // Initial feed fetch
     LaunchedEffect(Unit) {
         viewModel.loadKanimeFeed()
     }
 
-    // Scroll to top when search query or sort order changes
-    LaunchedEffect(currentSort, currentSearch) {
+    // Scroll to top on sort or search change
+    LaunchedEffect(currentSort, currentSearchQuery) {
         gridState.scrollToItem(0)
+    }
+
+    // Handle back button: close search first if open
+    BackHandler(enabled = isSearchExpanded) {
+        isSearchExpanded = false
+        searchInput = ""
+        viewModel.setKanimeSearchQuery("")
     }
 
     // Infinite scroll detection
@@ -97,182 +116,206 @@ fun KanimeScreen(
         }
     }
 
+    val sortOptions = remember {
+        listOf(
+            KanimeSortOrder.AZ to "A-Z",
+            KanimeSortOrder.ZA to "Z-A",
+            KanimeSortOrder.RECENTLY_UPLOADED to "Recently Uploaded",
+            KanimeSortOrder.RECENTLY_RELEASED to "Recently Released",
+            KanimeSortOrder.OLDEST_UPLOADS to "Oldest Uploads",
+            KanimeSortOrder.OLDEST_RELEASES to "Oldest Releases",
+            KanimeSortOrder.VIEW_COUNT to "View Count"
+        )
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = palette.bg,
+        contentWindowInsets = WindowInsets.statusBars,
         topBar = {
             TopAppBar(
                 title = {
-                    if (isSearchActive) {
+                    if (isSearchExpanded) {
                         LaunchedEffect(Unit) {
-                            searchFocusRequester.requestFocus()
+                            focusRequester.requestFocus()
                         }
-                        Box(
+                        BasicTextField(
+                            value = searchInput,
+                            onValueChange = { searchInput = it },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = palette.textPrimary,
+                                fontSize = 15.sp
+                            ),
+                            cursorBrush = SolidColor(accent),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(
+                                onSearch = {
+                                    focusManager.clearFocus()
+                                    viewModel.setKanimeSearchQuery(searchInput)
+                                }
+                            ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(40.dp)
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(palette.bg)
-                                .padding(horizontal = 14.dp),
-                            contentAlignment = Alignment.CenterStart
-                        ) {
-                            if (searchInputText.isEmpty()) {
-                                Text(
-                                    text = "Search Kanime...",
-                                    color = palette.textSecondary.copy(alpha = 0.6f),
-                                    fontSize = 14.sp
-                                )
-                            }
-                            BasicTextField(
-                                value = searchInputText,
-                                onValueChange = { searchInputText = it },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .focusRequester(searchFocusRequester),
-                                singleLine = true,
-                                textStyle = TextStyle(
-                                    color = palette.textPrimary,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Medium
-                                ),
-                                cursorBrush = SolidColor(accent),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                keyboardActions = KeyboardActions(
-                                    onSearch = {
-                                        focusManager.clearFocus()
-                                        viewModel.setKanimeSearchQuery(searchInputText)
+                                .focusRequester(focusRequester)
+                                .testTag("kanime_header_search_input"),
+                            decorationBox = { innerTextField ->
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    if (searchInput.isEmpty()) {
+                                        Text(
+                                            text = "Search Kanime...",
+                                            style = MaterialTheme.typography.bodyLarge.copy(
+                                                fontSize = 15.sp,
+                                                color = palette.textMuted
+                                            ),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
-                                )
-                            )
-                        }
+                                    innerTextField()
+                                }
+                            }
+                        )
                     } else {
                         Text(
-                            text = if (currentSearch.isNotBlank()) "Kanime: \"$currentSearch\"" else "Kanime",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 18.sp,
-                            color = palette.textPrimary,
+                            text = if (currentSearchQuery.isNotBlank()) "Kanime: \"$currentSearchQuery\"" else "Kanime",
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = (-0.5).sp
+                            ),
+                            color = palette.textPrimary
                         )
                     }
                 },
                 navigationIcon = {
-                    IconButton(
-                        onClick = {
-                            if (isSearchActive) {
-                                isSearchActive = false
-                                searchInputText = ""
-                                if (currentSearch.isNotEmpty()) {
-                                    viewModel.setKanimeSearchQuery("")
-                                }
-                            } else {
-                                viewModel.navigateBack()
-                            }
+                    if (isSearchExpanded) {
+                        IconButton(
+                            onClick = {
+                                isSearchExpanded = false
+                                searchInput = ""
+                                viewModel.setKanimeSearchQuery("")
+                            },
+                            modifier = Modifier.testTag("close_kanime_search_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Close Search",
+                                tint = palette.textPrimary
+                            )
                         }
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = palette.textPrimary
-                        )
+                    } else {
+                        IconButton(
+                            onClick = { viewModel.navigateBack() },
+                            modifier = Modifier.testTag("kanime_back_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = palette.textPrimary
+                            )
+                        }
                     }
                 },
                 actions = {
-                    if (isSearchActive) {
-                        if (searchInputText.isNotEmpty()) {
+                    if (isSearchExpanded) {
+                        if (searchInput.isNotEmpty()) {
                             IconButton(
                                 onClick = {
-                                    searchInputText = ""
-                                    viewModel.setKanimeSearchQuery("")
-                                }
+                                    focusManager.clearFocus()
+                                    viewModel.setKanimeSearchQuery(searchInput)
+                                },
+                                modifier = Modifier.testTag("kanime_header_search_submit")
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Clear search",
+                                    painter = painterResource(id = R.drawable.ic_app_search),
+                                    contentDescription = "Search",
+                                    tint = accent
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    searchInput = ""
+                                    viewModel.setKanimeSearchQuery("")
+                                },
+                                modifier = Modifier.testTag("clear_kanime_search_text_button")
+                            ) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_action_cancel),
+                                    contentDescription = "Clear text",
                                     tint = palette.textSecondary
                                 )
                             }
                         }
                     } else {
-                        // Search Button
+                        // Search Action Button
                         IconButton(
-                            onClick = {
-                                isSearchActive = true
-                                searchInputText = currentSearch
-                            }
+                            onClick = { isSearchExpanded = true },
+                            modifier = Modifier.testTag("kanime_search_action_button")
                         ) {
                             Icon(
                                 painter = painterResource(id = R.drawable.ic_app_search),
                                 contentDescription = "Search",
-                                tint = if (currentSearch.isNotBlank()) accent else palette.textPrimary,
-                                modifier = Modifier.size(20.dp)
+                                tint = if (currentSearchQuery.isNotBlank()) accent else palette.textPrimary
                             )
                         }
 
-                        // Sort Button with Dropdown Menu
+                        // Sort Action Button with standard unified DropdownMenu design
                         Box {
-                            IconButton(onClick = { isSortMenuExpanded = true }) {
+                            IconButton(
+                                onClick = { showSortMenu = true },
+                                modifier = Modifier.testTag("kanime_sort_action_button")
+                            ) {
                                 Icon(
                                     painter = painterResource(id = R.drawable.ic_app_sort),
                                     contentDescription = "Sort",
-                                    tint = palette.textPrimary,
-                                    modifier = Modifier.size(20.dp)
+                                    tint = palette.textPrimary
                                 )
                             }
 
                             DropdownMenu(
-                                expanded = isSortMenuExpanded,
-                                onDismissRequest = { isSortMenuExpanded = false },
-                                modifier = Modifier.background(palette.dialogBg)
+                                expanded = showSortMenu,
+                                onDismissRequest = { showSortMenu = false },
+                                modifier = Modifier.vaultTopGlow(cornerRadius = 16.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                containerColor = palette.cardBg
                             ) {
-                                KanimeSortOrder.values().forEach { order ->
+                                sortOptions.forEach { (order, label) ->
                                     val isSelected = currentSort == order
                                     DropdownMenuItem(
                                         text = {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Text(
-                                                    text = order.displayName,
-                                                    color = if (isSelected) accent else palette.textPrimary,
-                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                                    fontSize = 14.sp
+                                            Text(
+                                                text = label,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (isSelected) accent else palette.textPrimary
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            if (isSelected) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = accent
                                                 )
-                                                if (isSelected) {
-                                                    Spacer(modifier = Modifier.width(12.dp))
-                                                    Icon(
-                                                        imageVector = Icons.Default.Check,
-                                                        contentDescription = null,
-                                                        tint = accent,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                }
                                             }
                                         },
                                         onClick = {
-                                            isSortMenuExpanded = false
                                             viewModel.setKanimeSortOrder(order)
+                                            showSortMenu = false
                                         }
                                     )
                                 }
                             }
                         }
-
-                        // Refresh Button
-                        IconButton(onClick = { viewModel.loadKanimeFeed(forceRefresh = true) }) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Refresh",
-                                tint = palette.textSecondary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = palette.cardBg
+                    containerColor = palette.bg,
+                    titleContentColor = palette.textPrimary
                 )
             )
         }
@@ -284,20 +327,17 @@ fun KanimeScreen(
         ) {
             when {
                 isLoading && feed.isEmpty() -> {
-                    // Initial loading spinner
+                    // Modern Lottie Loading Animation as in LinkCard
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        CircularProgressIndicator(
-                            color = accent,
-                            strokeWidth = 3.dp,
-                            modifier = Modifier.size(36.dp)
+                        AppLottieLoadingAnimation(
+                            modifier = Modifier.size(70.dp)
                         )
                     }
                 }
                 error != null && feed.isEmpty() -> {
-                    // Error state with retry
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
@@ -321,7 +361,6 @@ fun KanimeScreen(
                     }
                 }
                 feed.isEmpty() -> {
-                    // Empty search result
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -329,7 +368,7 @@ fun KanimeScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (currentSearch.isNotBlank()) "No results found for \"$currentSearch\"" else "No content available",
+                            text = if (currentSearchQuery.isNotBlank()) "No results found for \"$currentSearchQuery\"" else "No content available",
                             color = palette.textSecondary,
                             fontSize = 14.sp,
                             textAlign = TextAlign.Center
@@ -348,11 +387,11 @@ fun KanimeScreen(
                         items(feed, key = { it.id }) { item ->
                             KanimeCleanPosterCard(
                                 item = item,
-                                onClick = { viewModel.playKanimeItem(item) }
+                                onClick = { viewModel.openKanimeItem(item) }
                             )
                         }
 
-                        // Infinite scroll bottom loading indicator
+                        // Infinite scroll bottom loading indicator (Lottie loading animation)
                         if (isLoadingMore) {
                             item(span = { GridItemSpan(2) }) {
                                 Box(
@@ -361,10 +400,8 @@ fun KanimeScreen(
                                         .padding(vertical = 16.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    CircularProgressIndicator(
-                                        color = accent,
-                                        strokeWidth = 2.5.dp,
-                                        modifier = Modifier.size(28.dp)
+                                    AppLottieLoadingAnimation(
+                                        modifier = Modifier.size(36.dp)
                                     )
                                 }
                             }
@@ -378,8 +415,9 @@ fun KanimeScreen(
 
 /**
  * Clean Poster Card:
- * Displays ONLY the poster image with no overlaid badges, tags, or text.
- * The title is positioned strictly below the card and clamped to 1 line only.
+ * Pure poster image with the same loading animation (ShimmerBrush + crossfade + scale/alpha fade-in)
+ * as LinkCard and the rest of the project.
+ * The title is strictly below the card, restricted to 1 line only.
  */
 @Composable
 private fun KanimeCleanPosterCard(
@@ -388,29 +426,80 @@ private fun KanimeCleanPosterCard(
 ) {
     val palette = LocalVaultPalette.current
     val context = LocalContext.current
+    val isBetaTest = LocalBetaTestPrivacy.current
+
+    var isImageLoaded by remember(item.posterUrl) { mutableStateOf(false) }
+    var isImageError by remember(item.posterUrl) { mutableStateOf(false) }
+
+    val imageAlpha by animateFloatAsState(
+        targetValue = if (isImageLoaded && !isImageError) 1f else 0f,
+        animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
+        label = "poster_alpha"
+    )
+    val imageScale by animateFloatAsState(
+        targetValue = if (isImageLoaded && !isImageError) 1f else 0.96f,
+        animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
+        label = "poster_scale"
+    )
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
     ) {
-        // Pure, clean poster container (Aspect Ratio 2:3)
+        // Pure poster image box (Aspect ratio 2:3)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(12.dp))
-                .background(palette.cardBg)
+                .background(palette.cardBg),
+            contentAlignment = Alignment.Center
         ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(item.posterUrl)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
+            // Shimmer animation matching LinkCard while loading
+            if (!isImageLoaded && !isImageError) {
+                val shimmerBrush = ShimmerBrush(targetValue = 900f)
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(palette.cardBg)
+                        .background(shimmerBrush)
+                )
+            }
+
+            if (!isImageError) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(item.posterUrl)
+                        .crossfade(260)
+                        .build(),
+                    contentDescription = item.title,
+                    contentScale = ContentScale.Crop,
+                    onSuccess = {
+                        isImageLoaded = true
+                        isImageError = false
+                    },
+                    onError = {
+                        isImageLoaded = true
+                        isImageError = true
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            alpha = imageAlpha
+                            scaleX = imageScale
+                            scaleY = imageScale
+                        }
+                        .privacyImageBlur(isBetaTest)
+                )
+            } else {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_nav_home),
+                    contentDescription = "Image Error",
+                    tint = palette.textSecondary.copy(alpha = 0.35f),
+                    modifier = Modifier.size(36.dp)
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(6.dp))
